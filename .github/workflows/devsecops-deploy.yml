@@ -20,8 +20,6 @@ jobs:
         uses: sonarsource/sonarqube-scan-action@master
         env:
           SONAR_TOKEN: ${{ secrets.SONAR_TOKEN }}
-          SONAR_HOST_URL: ${{ secrets.SONAR_HOST_URL }}
-
       # --- STAGE 2: SCA (Snyk) ---
       - name: Snyk Dependency Scan
         uses: snyk/actions/python@master
