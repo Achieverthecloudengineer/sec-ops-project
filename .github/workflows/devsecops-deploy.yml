@@ -1,0 +1,71 @@
+name: Production DevSecOps Pipeline
+
+on:
+  push:
+    branches: [ main ]
+
+jobs:
+  build-and-secure:
+    runs-on: ubuntu-latest
+    permissions:
+      id-token: write  # Required for Vault OIDC
+      contents: read
+
+    steps:
+      - name: Checkout Code
+        uses: actions/checkout@v4
+
+      # --- STAGE 1: SAST (SonarQube) ---
+      - name: SonarQube Scan
+        uses: sonarsource/sonarqube-scan-action@master
+        env:
+          SONAR_TOKEN: ${{ secrets.SONAR_TOKEN }}
+          SONAR_HOST_URL: ${{ secrets.SONAR_HOST_URL }}
+
+      # --- STAGE 2: SCA (Snyk) ---
+      - name: Snyk Dependency Scan
+        uses: snyk/actions/python@master
+        continue-on-error: false # BREAKS BUILD IF HIGH VULNS FOUND
+        env:
+          SNYK_TOKEN: ${{ secrets.SNYK_TOKEN }}
+        with:
+          args: --severity-threshold=high
+
+      # --- STAGE 3: SECRETS (Vault) ---
+      - name: Fetch DB Password from Vault
+        uses: hashicorp/vault-action@v2
+        with:
+          url: ${{ secrets.VAULT_ADDR }}
+          role: github-actions-role
+          method: jwt
+          secrets: |
+            secret/data/myapp/production db_password | DB_PASSWORD
+
+      # --- STAGE 4: CONTAINER SCAN (Trivy) ---
+      - name: Build and Scan Image
+        run: |
+          docker build -t my-flask-app:${{ github.sha }} .
+          # Trivy fails the build if CRITICAL issues exist in the Docker layers
+          docker run --rm -v /var/run/docker.sock:/var/run/docker.sock \
+          aquasec/trivy image --exit-code 1 --severity CRITICAL my-flask-app:${{ github.sha }}
+
+      # --- STAGE 5: DEPLOY TO EC2 ---
+      - name: Deploy to AWS EC2
+        uses: appleboy/ssh-action@master
+        with:
+          host: ${{ secrets.EC2_HOST }}
+          username: ubuntu
+          key: ${{ secrets.EC2_SSH_KEY }}
+          script: |
+            docker stop flask-app || true
+            docker rm flask-app || true
+            docker run -d --name flask-app -p 5000:5000 \
+            -e DB_PASSWORD="${{ env.DB_PASSWORD }}" \
+            my-flask-app:${{ github.sha }}
+
+      # --- STAGE 6: DAST (OWASP ZAP) ---
+      - name: OWASP ZAP Baseline Scan
+        uses: zaproxy/action-baseline@v0.12.0
+        with:
+          token: ${{ secrets.GITHUB_TOKEN }}
+          target: 'http://${{ secrets.EC2_HOST }}:5000'
